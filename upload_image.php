@@ -2,26 +2,55 @@
 include 'db_connection.php';
 session_start();
 
-$campaign_id = $_GET["id"];
+// Ensure campaign_id is properly received and validated
+if (!isset($_GET["id"]) || !is_numeric($_GET["id"])) {
+    die("Invalid campaign ID");
+}
+$campaign_id = intval($_GET["id"]);
+
+// Create uploads directory if it doesn't exist
+$upload_dir = "uploads/campaign_images/";
+if (!file_exists($upload_dir)) {
+    mkdir($upload_dir, 0777, true);
+}
 
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['image'])) {
-    $campaign_id = intval($_POST['campaign_id']);
-    $is_primary = intval($_POST['is_primary'] ?? 0);
-    $target_dir = "uploads/";
-    $file_name = basename($_FILES['image']['name']);
-    $target_file = $target_dir . $file_name;
-
+    $is_primary = isset($_POST['is_primary']) ? 1 : 0;
+    
+    // Generate unique filename
+    $file_extension = strtolower(pathinfo($_FILES['image']['name'], PATHINFO_EXTENSION));
+    $file_name = uniqid('campaign_') . '.' . $file_extension;
+    $target_file = $upload_dir . $file_name;
+    
+    // Validate file type
+    $allowed_types = ['jpg', 'jpeg', 'png', 'gif'];
+    if (!in_array($file_extension, $allowed_types)) {
+        die("Error: Only JPG, JPEG, PNG & GIF files are allowed.");
+    }
+    
     if (move_uploaded_file($_FILES['image']['tmp_name'], $target_file)) {
-        // Insert image data into `campaign_images`
+        // Insert image data into database
         $stmt = $conn->prepare("INSERT INTO campaign_images (campaign_id, file_name, is_primary, created_at) VALUES (?, ?, ?, NOW())");
+        if (!$stmt) {
+            die("Error preparing statement: " . $conn->error);
+        }
+        
         $stmt->bind_param("isi", $campaign_id, $file_name, $is_primary);
         if ($stmt->execute()) {
-            echo "Image uploaded successfully.";
+            // If this is primary image, update other images to non-primary
+            if ($is_primary) {
+                $update_stmt = $conn->prepare("UPDATE campaign_images SET is_primary = 0 WHERE campaign_id = ? AND file_name != ?");
+                $update_stmt->bind_param("is", $campaign_id, $file_name);
+                $update_stmt->execute();
+            }
+            header("Location: campaign.php?id=" . $campaign_id);
+            exit;
         } else {
             echo "Database error: " . $stmt->error;
         }
     } else {
-        echo "Error uploading file.";
+        echo "Error uploading file. Details: ";
+        print_r($_FILES['image']['error']);
     }
 }
 ?>
@@ -38,8 +67,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['image'])) {
     <header>
         <h1>Crowdfunding Platform</h1>
         <nav>
-            <a href="index.php">Home</a>
-            <a href="campaigns.php">Campaigns</a>
+            <ul>
+                <li><a href="index.php">Home</a></li>
+                <li><a href="campaigns.php">Campaigns</a></li>
+                <li><a href="login.php">Login</a></li>
+                <li><a href="register.php">Register</a></li>
+            </ul>
         </nav>
     </header>
 
@@ -54,20 +87,22 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['image'])) {
 
                 <div class="form-group">
                     <label>
-                        <input type="checkbox" name="is_primary"> 
+                        <input type="checkbox" name="is_primary" value="1"> 
                         Set as Primary Campaign Image
                     </label>
                 </div>
 
+                <input type="hidden" name="campaign_id" value="<?php echo htmlspecialchars($campaign_id); ?>">
+                
                 <div class="form-group">
-                    <button type="submit" class="btn-submit">Upload Image</button>
+                    <button type="submit" class="btn">Upload Image</button>
                 </div>
             </form>
         </section>
     </main>
 
     <footer>
-        <p>&copy; <?php echo date('Y'); ?> Crowdfunding Platform. All rights reserved.</p>
+        <p>&copy; <?php echo date('Y'); ?> Crowdfunding Platform</p>
     </footer>
 </body>
 </html>

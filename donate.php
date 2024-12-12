@@ -1,49 +1,58 @@
 <?php
-// Debugging for Crowdfunding Platform: Donation Fix
 require 'db_connection.php';
+require_once __DIR__ . '/campaign_functions.php';
 session_start();
 
-// Donation Logic
+// Check if user is logged in
+if (!isset($_SESSION['user_id'])) {
+    $_SESSION['redirect_after_login'] = $_SERVER['REQUEST_URI'];
+    header("Location: login.php");
+    exit;
+}
+
+// Get campaign details
+if (isset($_GET['id'])) {
+    $campaign_id = intval($_GET['id']);
+    $stmt = $conn->prepare("SELECT * FROM campaigns WHERE id = ?");
+    $stmt->bind_param("i", $campaign_id);
+    $stmt->execute();
+    $campaign = $stmt->get_result()->fetch_assoc();
+
+    if (!$campaign) {
+        die("Campaign not found");
+    }
+}
+
+// Handle donation submission
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['donate'])) {
-    $campaign_id = intval($_POST['campaign_id']);
-    $user_id = $_SESSION['user_id'] ?? null; // Ensure user is logged in
     $amount = floatval($_POST['amount']);
+    $user_id = $_SESSION['user_id'];
+    
+    if ($amount <= 0) {
+        $error = "Please enter a valid amount greater than 0";
+    } else {
+        try {
+            $conn->begin_transaction();
 
-    // Debug: Check if required fields are set
-    if (!$user_id) {
-        echo "Error: User not logged in.";
-        exit;
-    }
+            // Insert donation record
+            $stmt = $conn->prepare("INSERT INTO transactions (campaign_id, user_id, amount, status, created_at) VALUES (?, ?, ?, 'completed', NOW())");
+            $stmt->bind_param("iid", $campaign_id, $user_id, $amount);
+            $stmt->execute();
 
-    if ($campaign_id <= 0 || $amount <= 0) {
-        echo "Error: Invalid campaign ID or donation amount.";
-        exit;
-    }
-
-    try {
-        // Insert donation into `transactions`
-        $code = uniqid('txn_');
-        $stmt = $conn->prepare("INSERT INTO transactions (campaign_id, user_id, amount, status, code, created_at) VALUES (?, ?, ?, 'pending', ?, NOW())");
-        $stmt->bind_param("iids", $campaign_id, $user_id, $amount, $code);
-
-        if ($stmt->execute()) {
-            // Debug: Confirm insertion
-            echo "Transaction inserted successfully.";
-
-            // Update campaign's current amount
-            $update_stmt = $conn->prepare("UPDATE campaigns SET current_amount = current_amount + ? WHERE id = ?");
-            $update_stmt->bind_param("di", $amount, $campaign_id);
-
-            if ($update_stmt->execute()) {
-                echo "Donation successful. Thank you for your support!";
+            // Update campaign stats using the new function
+            if (updateCampaignStats($conn, $campaign_id)) {
+                $conn->commit();
+                $_SESSION['success_message'] = "Thank you for your donation of $" . number_format($amount, 2) . "!";
+                header("Location: campaign.php?id=" . $campaign_id);
+                exit;
             } else {
-                echo "Error updating campaign amount: " . $update_stmt->error;
+                throw new Exception("Failed to update campaign stats");
             }
-        } else {
-            echo "Error processing donation: " . $stmt->error;
+
+        } catch (Exception $e) {
+            $conn->rollback();
+            $error = "An error occurred while processing your donation. Please try again.";
         }
-    } catch (Exception $e) {
-        echo "Exception caught: " . $e->getMessage();
     }
 }
 ?>
@@ -53,8 +62,35 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['donate'])) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Donate to Campaign</title>
+    <title>Donate to Campaign - Crowdfunding Platform</title>
     <link rel="stylesheet" href="style.css">
+    <style>
+        .donation-form {
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .campaign-summary {
+            margin-bottom: 20px;
+            padding: 15px;
+            background: #f9f9f9;
+            border-radius: 4px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .error {
+            color: #dc3545;
+            margin-bottom: 15px;
+        }
+        .success {
+            color: #28a745;
+            margin-bottom: 15px;
+        }
+    </style>
 </head>
 <body>
     <header>
@@ -70,22 +106,45 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['donate'])) {
     </header>
 
     <main>
-        <section>
-            <h2>Make a Donation</h2>
-            <form method="POST">
-                <label for="campaign_id_donate">Campaign ID:</label>
-                <input type="number" id="campaign_id_donate" name="campaign_id" required>
+        <div class="donation-form">
+            <?php if (isset($error)): ?>
+                <div class="error"><?php echo htmlspecialchars($error); ?></div>
+            <?php endif; ?>
 
-                <label for="amount">Amount:</label>
-                <input type="number" id="amount" name="amount" step="0.01" required>
+            <?php if (isset($campaign)): ?>
+                <div class="campaign-summary">
+                    <h2><?php echo htmlspecialchars($campaign['name']); ?></h2>
+                    <p><strong>Current Progress:</strong> 
+                        $<?php echo number_format($campaign['current_amount'], 2); ?> 
+                        of $<?php echo number_format($campaign['goal_amount'], 2); ?>
+                    </p>
+                    <p><strong>Backers:</strong> <?php echo number_format($campaign['backer_count']); ?></p>
+                </div>
 
-                <button type="submit" name="donate">Donate</button>
-            </form>
-        </section>
+                <form method="POST" action="">
+                    <div class="form-group">
+                        <label for="amount">Donation Amount ($):</label>
+                        <input type="number" 
+                               id="amount" 
+                               name="amount" 
+                               min="1" 
+                               step="0.01" 
+                               required 
+                               value="<?php echo isset($_POST['amount']) ? htmlspecialchars($_POST['amount']) : ''; ?>">
+                    </div>
+
+                    <input type="hidden" name="campaign_id" value="<?php echo $campaign_id; ?>">
+                    
+                    <button type="submit" name="donate" class="btn">Complete Donation</button>
+                </form>
+            <?php else: ?>
+                <p>Campaign not found.</p>
+            <?php endif; ?>
+        </div>
     </main>
 
     <footer>
-        <p>&copy; 2024 Crowdfunding Platform</p>
+        <p>&copy; <?php echo date('Y'); ?> Crowdfunding Platform</p>
     </footer>
 </body>
 </html>
